@@ -46,11 +46,13 @@ jobs:
       - name: Build Cry of Fear Android APK
         shell: pwsh
         run: |
+          $abis = [string[]]@("arm64")
+          
           ./scripts/build-android.ps1 `
-            -Configuration Release `
-            -Abi @("arm64-v8a") `
+            -Configuration "Release" `
+            -Abi $abis `
             -MinSdk 23 `
-            -NdkVersion 29.0.14206865 `
+            -NdkVersion "29.0.14206865" `
             -Jobs 2
 
       - name: Upload APK
