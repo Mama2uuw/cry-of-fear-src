@@ -19,15 +19,18 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: ''
 
       - name: Install Android SDK components
         run: |
+          yes | sdkmanager --licenses
           sdkmanager "platform-tools" \
                      "platforms;android-35" \
                      "build-tools;35.0.0" \
                      "ndk;29.0.14206865"
 
-      - name: Make Waf executable
+      - name: Make Waf and Gradle executable
         run: |
           chmod +x src/cof/waf
           chmod +x external/xash3d-fwgs/android/gradlew
