@@ -23,7 +23,6 @@ jobs:
           echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
           echo "/usr/local/lib/android/sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "/usr/local/lib/android/sdk/platform-tools" >> $GITHUB_PATH
-          echo "/usr/local/lib/android/sdk/tools/bin" >> $GITHUB_PATH
 
           export ANDROID_HOME=/usr/local/lib/android/sdk
           export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
@@ -49,7 +48,7 @@ jobs:
         run: |
           ./scripts/build-android.ps1 `
             -Configuration Release `
-            -Abi arm64 `
+            -Abi @("arm64-v8a") `
             -MinSdk 23 `
             -NdkVersion 29.0.14206865 `
             -Jobs 2
