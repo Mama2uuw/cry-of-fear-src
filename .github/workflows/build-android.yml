@@ -1,0 +1,50 @@
+name: Build Cry of Fear Android
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager "platform-tools" \
+                     "platforms;android-35" \
+                     "build-tools;35.0.0" \
+                     "ndk;29.0.14206865"
+
+      - name: Make Waf executable
+        run: |
+          chmod +x src/cof/waf
+          chmod +x external/xash3d-fwgs/android/gradlew
+
+      - name: Build Cry of Fear Android APK
+        shell: pwsh
+        run: |
+          ./scripts/build-android.ps1 `
+            -Configuration Release `
+            -Abi arm64 `
+            -MinSdk 23 `
+            -NdkVersion 29.0.14206865 `
+            -Jobs 2
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cry-of-fear-android-arm64
+          path: out/android/xash3d-cof.apk
+          if-no-files-found: error
