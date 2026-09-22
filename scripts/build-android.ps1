@@ -1,109 +1,855 @@
-[CmdletBinding()]
-param(
-    [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Debug",
+function Resolve-CofAndroidAbis {
+    param(
+        [string[]]$Abi = @("arm")
+    )
 
-    [string[]]$Abi = @("arm"),
+    $resolved = New-Object System.Collections.Generic.List[string]
 
-    [int]$MinSdk = 23,
+    foreach ($entry in $Abi) {
+        $value = [string]$entry
+        $value = $value.ToLowerInvariant()
 
-    [string]$NdkVersion = "29.0.14206865",
+        switch ($value) {
+            "arm" {
+                [void]$resolved.Add("armeabi-v7a")
+                [void]$resolved.Add("arm64-v8a")
+            }
+            "all" {
+                [void]$resolved.Add("armeabi-v7a")
+                [void]$resolved.Add("arm64-v8a")
+                [void]$resolved.Add("x86")
+                [void]$resolved.Add("x86_64")
+            }
+            "armv7" {
+                [void]$resolved.Add("armeabi-v7a")
+            }
+            "armv7a" {
+                [void]$resolved.Add("armeabi-v7a")
+            }
+            "armeabi-v7a" {
+                [void]$resolved.Add("armeabi-v7a")
+            }
+            "arm64" {
+                [void]$resolved.Add("arm64-v8a")
+            }
+            "aarch64" {
+                [void]$resolved.Add("arm64-v8a")
+            }
+            "arm64-v8a" {
+                [void]$resolved.Add("arm64-v8a")
+            }
+            "x86" {
+                [void]$resolved.Add("x86")
+            }
+            "x86_64" {
+                [void]$resolved.Add("x86_64")
+            }
+            default {
+                throw "Unknown Android ABI '$entry'. Use arm, all, armeabi-v7a, arm64-v8a, x86, or x86_64."
+            }
+        }
+    }
 
-    [int]$Jobs = [Environment]::ProcessorCount,
-
-    [string]$AndroidSdkRoot = "",
-
-    [string]$AndroidNdkRoot = "",
-
-    [string]$ProjectDir = "",
-
-    [string]$OutputApk = "",
-
-    [switch]$CleanNative,
-
-    [switch]$PrepareOnly,
-
-    [switch]$SkipGameLibraries
-)
-
-$ErrorActionPreference = "Stop"
-
-. "$PSScriptRoot\_common.ps1"
-
-$repoRoot = Get-RepoRoot
-$engineRoot = Join-Path $repoRoot "external\xash3d-fwgs"
-$templateProjectDir = Join-Path $engineRoot "android"
-$cofSourceDir = Join-Path $repoRoot "src\cof"
-$generatedRoot = Join-Path $repoRoot "build\android"
-$cofNativeBuildRoot = Join-Path $generatedRoot "cof-libs"
-
-if (-not $ProjectDir) {
-    $ProjectDir = Join-Path $generatedRoot "xash3d-cof"
+    return [string[]]($resolved | Select-Object -Unique)
 }
 
-if (-not $OutputApk) {
-    $OutputApk = Join-Path $repoRoot "out\android\xash3d-cof.apk"
+
+function Resolve-AndroidSdkRoot {
+    param(
+        [string]$AndroidSdkRoot = ""
+    )
+
+    $candidates = @()
+
+    if ($AndroidSdkRoot) {
+        $candidates += $AndroidSdkRoot
+    }
+
+    foreach ($name in @("ANDROID_HOME", "ANDROID_SDK_ROOT")) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+
+        if ($value) {
+            $candidates += $value
+        }
+    }
+
+    $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+
+    if ($localAppData) {
+        $candidates += (Join-Path $localAppData "Android\Sdk")
+    }
+
+    foreach ($candidate in $candidates | Select-Object -Unique) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            return (Convert-ToFullPath $candidate)
+        }
+    }
+
+    throw "Android SDK was not found. Install Android Studio or set ANDROID_HOME / ANDROID_SDK_ROOT."
 }
 
-$abis = Resolve-CofAndroidAbis -Abi $Abi
 
-if (-not (Test-Path -LiteralPath (Join-Path $templateProjectDir "gradlew.bat"))) {
-    throw "Xash3D Android project is missing: $templateProjectDir"
+function Resolve-AndroidNdkRoot {
+    param(
+        [string]$AndroidNdkRoot = "",
+        [string]$AndroidSdkRoot = "",
+        [string]$NdkVersion = "29.0.14206865"
+    )
+
+    $candidates = @()
+
+    if ($AndroidNdkRoot) {
+        $candidates += $AndroidNdkRoot
+    }
+
+    foreach ($name in @("ANDROID_NDK_ROOT", "ANDROID_NDK_HOME", "ANDROID_NDK")) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+
+        if ($value) {
+            $candidates += $value
+        }
+    }
+
+    if ($AndroidSdkRoot) {
+        $preferred = Join-Path $AndroidSdkRoot "ndk\$NdkVersion"
+        $candidates += $preferred
+
+        $ndkDir = Join-Path $AndroidSdkRoot "ndk"
+
+        if (Test-Path -LiteralPath $ndkDir) {
+            $latest = Get-ChildItem `
+                -LiteralPath $ndkDir `
+                -Directory `
+                -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                Select-Object -First 1
+
+            if ($latest) {
+                $candidates += $latest.FullName
+            }
+        }
+    }
+
+    foreach ($candidate in $candidates | Select-Object -Unique) {
+        if (-not $candidate -or -not (Test-Path -LiteralPath $candidate)) {
+            continue
+        }
+
+        $clang = Join-Path $candidate "toolchains\llvm\prebuilt"
+
+        if (Test-Path -LiteralPath $clang) {
+            return (Convert-ToFullPath $candidate)
+        }
+    }
+
+    throw "Android NDK was not found. Install NDK $NdkVersion from Android Studio SDK Manager or pass -AndroidNdkRoot."
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $cofSourceDir "wscript"))) {
-    throw "CoF waf project is missing: $cofSourceDir"
+
+function ConvertTo-KotlinFileLiteral {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $literal = (Convert-ToFullPath $Path).Replace("\", "/").Replace('"', '\"')
+
+    return "file(`"$literal`")"
 }
 
-Write-Host "Preparing Xash3D CoF Android project..."
-Write-Host "ABIs: $($abis -join ', ')"
 
-Initialize-CofAndroidProject `
-    -TemplateDir $templateProjectDir `
-    -ProjectDir $ProjectDir `
-    -GeneratedRoot $generatedRoot `
-    -RepoRoot $repoRoot `
-    -EngineRoot $engineRoot `
-    -Abis $abis `
-    -NdkVersion $NdkVersion
+function Remove-GeneratedAndroidProject {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir,
 
-if ($PrepareOnly) {
-    Write-Host ""
-    Write-Host "Prepared generated Android project:"
-    Write-Host $ProjectDir
-    return
-}
+        [Parameter(Mandatory = $true)]
+        [string]$AllowedRoot
+    )
 
-$sdkRoot = Resolve-AndroidSdkRoot -AndroidSdkRoot $AndroidSdkRoot
-$ndkRoot = Resolve-AndroidNdkRoot -AndroidNdkRoot $AndroidNdkRoot -AndroidSdkRoot $sdkRoot -NdkVersion $NdkVersion
+    $fullProjectDir = Convert-ToFullPath $ProjectDir
+    $fullAllowedRoot = Convert-ToFullPath $AllowedRoot
 
-if (-not $SkipGameLibraries) {
-    foreach ($abi in $abis) {
-        Write-Host ""
-        Write-Host "Building CoF game libraries for $abi..."
+    if (-not $fullProjectDir.StartsWith(
+        $fullAllowedRoot,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "Refusing to remove Android project outside generated build root: $fullProjectDir"
+    }
 
-        $abiBuildDir = Invoke-CofAndroidWafBuild `
-            -SourceDir $cofSourceDir `
-            -BuildDir $cofNativeBuildRoot `
-            -Abi $abi `
-            -AndroidNdkRoot $ndkRoot `
-            -Configuration $Configuration `
-            -MinSdk $MinSdk `
-            -Jobs $Jobs `
-            -CleanFirst:$CleanNative
-
-        Copy-CofAndroidGameLibraries -AbiBuildDir $abiBuildDir -ProjectDir $ProjectDir -Abi $abi
+    if (Test-Path -LiteralPath $fullProjectDir) {
+        Remove-Item -LiteralPath $fullProjectDir -Recurse -Force
     }
 }
-else {
-    Write-Warning "Skipping CoF game library build. Existing app/src/main/jniLibs content will be used."
+
+
+function Initialize-CofAndroidProject {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TemplateDir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$GeneratedRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EngineRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Abis,
+
+        [string]$NdkVersion = "29.0.14206865"
+    )
+
+    Remove-GeneratedAndroidProject `
+        -ProjectDir $ProjectDir `
+        -AllowedRoot $GeneratedRoot
+
+    New-Item `
+        -ItemType Directory `
+        -Path (Split-Path -Parent $ProjectDir) `
+        -Force |
+        Out-Null
+
+    Copy-Item `
+        -LiteralPath $TemplateDir `
+        -Destination $ProjectDir `
+        -Recurse `
+        -Force
+
+    Set-CofAndroidGradleProject `
+        -ProjectDir $ProjectDir `
+        -RepoRoot $RepoRoot `
+        -EngineRoot $EngineRoot `
+        -Abis $Abis `
+        -NdkVersion $NdkVersion
+
+    Set-CofAndroidManifest `
+        -ProjectDir $ProjectDir
+
+    Set-CofAndroidStrings `
+        -ProjectDir $ProjectDir
+
+    New-CofAndroidLauncherActivity `
+        -ProjectDir $ProjectDir
 }
 
-Write-Host ""
-Write-Host "Building APK..."
-Invoke-CofAndroidGradleBuild -ProjectDir $ProjectDir -Configuration $Configuration -AndroidSdkRoot $sdkRoot
-Copy-CofAndroidApk -ProjectDir $ProjectDir -Configuration $Configuration -OutputApk $OutputApk
 
-Write-Host ""
-Write-Host "Xash3D CoF APK created:"
-Write-Host $OutputApk
+function Set-CofAndroidGradleProject {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EngineRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Abis,
+
+        [string]$NdkVersion = "29.0.14206865"
+    )
+
+    $buildFile = Join-Path $ProjectDir "app\build.gradle.kts"
+    $settingsFile = Join-Path $ProjectDir "settings.gradle.kts"
+
+    $content = Get-Content -LiteralPath $buildFile -Raw
+
+    $repoLiteral = ConvertTo-KotlinFileLiteral -Path $RepoRoot
+    $engineLiteral = ConvertTo-KotlinFileLiteral -Path $EngineRoot
+
+    $abisLiteral = (
+        [string[]]$Abis |
+        ForEach-Object {
+            "`"$([string]$_)`""
+        }
+    ) -join ", "
+
+    $content = [regex]::Replace(
+        $content,
+        '(?s)(plugins\s*\{.*?\}\r?\n)',
+        {
+            param($m)
+
+            $m.Value +
+                "`nval cofRepoRoot = $repoLiteral`n" +
+                "val xashEngineRoot = $engineLiteral`n"
+        },
+        1
+    )
+
+    $content = $content -replace `
+        'namespace = "su\.xash\.engine"', `
+        'namespace = "su.xash.cof"'
+
+    $content = $content -replace `
+        'ndkVersion = "[^"]+"', `
+        "ndkVersion = `"$NdkVersion`""
+
+    $content = $content -replace `
+        'applicationId = "su\.xash\.engine"', `
+        'applicationId = "su.xash.cof"'
+
+    $content = $content -replace `
+        'versionName = "0\.21-" \+ getGitHash\(\)', `
+        'versionName = "cof-" + getGitHash()'
+
+    $content = $content -replace `
+        'val engineRoot = projectDir\.parentFile\.parent', `
+        'val engineRoot = xashEngineRoot'
+
+    $content = $content -replace `
+        'experimentalProperties\["ninja\.abiFilters"\] = setOf\([^)]+\)', `
+        "experimentalProperties[`"ninja.abiFilters`"] = setOf($abisLiteral)"
+
+    $content = $content -replace `
+        'assets\.directories\.add\("\.\./\.\./3rdparty/extras/xash-extras"\)', `
+        'assets.directories.add(File(xashEngineRoot, "3rdparty/extras/xash-extras"))'
+
+    $content = $content -replace `
+        'java\.directories\.add\("\.\./\.\./3rdparty/SDL/android-project/app/src/main/java"\)', `
+        'java.directories.add(File(xashEngineRoot, "3rdparty/SDL/android-project/app/src/main/java"))'
+
+    $content = $content -replace `
+        '\r?\n\s*applicationIdSuffix = "\.test"', `
+        ''
+
+    $content = [regex]::Replace(
+        $content,
+        'release \{\r?\n',
+        "release {`r`n`t`t`t`t`tsigningConfig = signingConfigs.getByName(`"androidDebugKey`")`r`n",
+        1
+    )
+
+    $content = $content -replace `
+        '\.directory\(project\.rootDir\)', `
+        '.directory(cofRepoRoot)'
+
+    Set-Content `
+        -LiteralPath $buildFile `
+        -Value $content `
+        -Encoding UTF8
+
+    $settings = Get-Content `
+        -LiteralPath $settingsFile `
+        -Raw
+
+    $settings = $settings -replace `
+        'rootProject\.name = "Xash3D FWGS"', `
+        'rootProject.name = "Xash3D CoF"'
+
+    Set-Content `
+        -LiteralPath $settingsFile `
+        -Value $settings `
+        -Encoding UTF8
+}
+
+
+function Set-CofAndroidManifest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir
+    )
+
+    $manifestFile = Join-Path `
+        $ProjectDir `
+        "app\src\main\AndroidManifest.xml"
+
+    $manifest = Get-Content `
+        -LiteralPath $manifestFile `
+        -Raw
+
+    $replacement = @'
+		<activity
+			android:name=".CofLauncherActivity"
+			android:exported="true">
+			<intent-filter>
+				<action android:name="android.intent.action.MAIN" />
+
+				<category android:name="android.intent.category.LAUNCHER" />
+			</intent-filter>
+		</activity>
+		<activity
+			android:name=".MainActivity"
+			android:exported="false" />
+'@
+
+    $manifest = [regex]::Replace(
+        $manifest,
+        '(?s)\s*<activity\s+android:name="\.MainActivity"\s+android:exported="true">\s*<intent-filter>.*?</intent-filter>\s*</activity>',
+        "`r`n$replacement",
+        1
+    )
+
+    Set-Content `
+        -LiteralPath $manifestFile `
+        -Value $manifest `
+        -Encoding UTF8
+}
+
+
+function Set-CofAndroidStrings {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir
+    )
+
+    $stringsFile = Join-Path `
+        $ProjectDir `
+        "app\src\main\res\values\strings.xml"
+
+    $strings = Get-Content `
+        -LiteralPath $stringsFile `
+        -Raw
+
+    $strings = [regex]::Replace(
+        $strings,
+        '(?s)<string name="app_name" translatable="false">.*?</string>',
+        '<string name="app_name" translatable="false">Xash3D CoF</string>',
+        1
+    )
+
+    Set-Content `
+        -LiteralPath $stringsFile `
+        -Value $strings `
+        -Encoding UTF8
+}
+
+
+function New-CofAndroidLauncherActivity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir
+    )
+
+    $activityDir = Join-Path `
+        $ProjectDir `
+        "app\src\main\java\su\xash\engine"
+
+    New-Item `
+        -ItemType Directory `
+        -Path $activityDir `
+        -Force |
+        Out-Null
+
+    $activityFile = Join-Path `
+        $activityDir `
+        "CofLauncherActivity.kt"
+
+    $activity = @'
+package su.xash.engine
+
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
+
+class CofLauncherActivity : Activity() {
+	private var requestedStorage = false
+	private var startedEngine = false
+
+	override fun onCreate(savedInstanceState: Bundle?) {
+		super.onCreate(savedInstanceState)
+		launchWhenReady()
+	}
+
+	override fun onResume() {
+		super.onResume()
+		launchWhenReady()
+	}
+
+	override fun onRequestPermissionsResult(
+		requestCode: Int,
+		permissions: Array<out String>,
+		grantResults: IntArray
+	) {
+		super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+		launchWhenReady()
+	}
+
+	private fun launchWhenReady() {
+		if (startedEngine)
+			return
+
+		if (!hasStorageAccess()) {
+			requestStorageAccess()
+			return
+		}
+
+		startedEngine = true
+
+		val baseDir = Environment.getExternalStorageDirectory().absolutePath + "/xash"
+		val args = "-game cryoffear -dll @hl -clientlib @client -console -log"
+
+		startActivity(Intent(this, XashActivity::class.java).apply {
+			flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+			putExtra("gamedir", "valve")
+			putExtra("argv", args)
+			putExtra("basedir", baseDir)
+			putExtra("gamelibdir", applicationInfo.nativeLibraryDir)
+			putExtra("package", packageName)
+		})
+
+		finish()
+	}
+
+	private fun hasStorageAccess(): Boolean {
+		return when {
+			Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+				Environment.isExternalStorageManager()
+
+			Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> {
+				checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
+					checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+			}
+
+			else -> true
+		}
+	}
+
+	private fun requestStorageAccess() {
+		if (requestedStorage)
+			return
+
+		requestedStorage = true
+
+		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+			val uri = Uri.fromParts("package", packageName, null)
+
+			try {
+				startActivity(
+					Intent(
+						Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION
+					).setData(uri)
+				)
+			} catch (_: Exception) {
+				startActivity(
+					Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+				)
+			}
+		} else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+			requestPermissions(
+				arrayOf(
+					Manifest.permission.READ_EXTERNAL_STORAGE,
+					Manifest.permission.WRITE_EXTERNAL_STORAGE
+				),
+				1
+			)
+		}
+	}
+}
+'@
+
+    Set-Content `
+        -LiteralPath $activityFile `
+        -Value $activity `
+        -Encoding UTF8
+}
+
+
+function Invoke-CofAndroidWafBuild {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceDir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BuildDir,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Abi,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AndroidNdkRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Configuration,
+
+        [int]$MinSdk = 23,
+
+        [int]$Jobs = [Environment]::ProcessorCount,
+
+        [switch]$CleanFirst
+    )
+
+    # Convert any incoming collection to exactly ONE ABI string.
+    $Abi = [string](@($Abi)[0])
+
+    if ([string]::IsNullOrWhiteSpace($Abi)) {
+        throw "Android ABI is empty."
+    }
+
+    # GitHub Actions uses Linux.
+    # On Linux we must execute "waf", not "waf.bat".
+    if ($IsWindows) {
+        $waf = Join-Path $SourceDir "waf.bat"
+
+        if (-not (Test-Path -LiteralPath $waf)) {
+            $waf = Join-Path $SourceDir "waf"
+        }
+    }
+    else {
+        $waf = Join-Path $SourceDir "waf"
+    }
+
+    if (-not (Test-Path -LiteralPath $waf)) {
+        throw "Cannot find CoF waf entrypoint in $SourceDir."
+    }
+
+    $wafBuildType = Convert-CmakeConfigurationToWafBuildType `
+        -Configuration $Configuration
+
+    $abiBuildDir = Join-Path $BuildDir $Abi
+
+    $oldAndroidNdk = [Environment]::GetEnvironmentVariable("ANDROID_NDK")
+    $oldAndroidNdkHome = [Environment]::GetEnvironmentVariable("ANDROID_NDK_HOME")
+
+    try {
+        [Environment]::SetEnvironmentVariable(
+            "ANDROID_NDK",
+            $AndroidNdkRoot
+        )
+
+        [Environment]::SetEnvironmentVariable(
+            "ANDROID_NDK_HOME",
+            $AndroidNdkRoot
+        )
+
+        $configureArgs = @(
+            "configure",
+            "-T", $wafBuildType,
+            "-o", $abiBuildDir,
+            "--prefix=/",
+            "--disable-werror",
+            "--android=$Abi,,$MinSdk",
+            "--enable-android-apk",
+            "--gamedir=cryoffear",
+            "--server-install-dir=cl_dlls",
+            "--client-install-dir=cl_dlls",
+            "--server-library-name=hl"
+        )
+
+        Invoke-Checked `
+            -FilePath $waf `
+            -ArgumentList $configureArgs `
+            -WorkingDirectory $SourceDir
+
+        if ($CleanFirst) {
+            Invoke-Checked `
+                -FilePath $waf `
+                -ArgumentList @(
+                    "clean",
+                    "-o",
+                    $abiBuildDir
+                ) `
+                -WorkingDirectory $SourceDir
+        }
+
+        Invoke-Checked `
+            -FilePath $waf `
+            -ArgumentList @(
+                "build",
+                "-o",
+                $abiBuildDir,
+                "-j$Jobs"
+            ) `
+            -WorkingDirectory $SourceDir
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable(
+            "ANDROID_NDK",
+            $oldAndroidNdk
+        )
+
+        [Environment]::SetEnvironmentVariable(
+            "ANDROID_NDK_HOME",
+            $oldAndroidNdkHome
+        )
+    }
+
+    return [string]$abiBuildDir
+}
+
+
+function Copy-CofAndroidGameLibraries {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AbiBuildDir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Abi
+    )
+
+    # Convert any incoming collection to exactly ONE ABI string.
+    $Abi = [string](@($Abi)[0])
+
+    if ([string]::IsNullOrWhiteSpace($Abi)) {
+        throw "Android ABI is empty while copying libraries."
+    }
+
+    $server = Get-ChildItem `
+        -LiteralPath $AbiBuildDir `
+        -Recurse `
+        -File `
+        -Filter "*.so" |
+        Where-Object {
+            $_.Name -match '^libhl(_|\.|$)'
+        } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+
+    $client = Get-ChildItem `
+        -LiteralPath $AbiBuildDir `
+        -Recurse `
+        -File `
+        -Filter "*.so" |
+        Where-Object {
+            $_.Name -match '^libclient(_|\.|$)'
+        } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+
+    if (-not $server) {
+        throw "Android server library was not found in $AbiBuildDir."
+    }
+
+    if (-not $client) {
+        throw "Android client library was not found in $AbiBuildDir."
+    }
+
+    $jniDir = Join-Path `
+        $ProjectDir `
+        "app\src\main\jniLibs\$Abi"
+
+    New-Item `
+        -ItemType Directory `
+        -Path $jniDir `
+        -Force |
+        Out-Null
+
+    Copy-Item `
+        -LiteralPath $server.FullName `
+        -Destination (Join-Path $jniDir "libhl.so") `
+        -Force
+
+    Copy-Item `
+        -LiteralPath $client.FullName `
+        -Destination (Join-Path $jniDir "libclient.so") `
+        -Force
+}
+
+
+function Invoke-CofAndroidGradleBuild {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Configuration,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AndroidSdkRoot
+    )
+
+    $gradle = Join-Path `
+        $ProjectDir `
+        "gradlew.bat"
+
+    if (-not (Test-Path -LiteralPath $gradle)) {
+        $gradle = Join-Path `
+            $ProjectDir `
+            "gradlew"
+    }
+
+    if (-not (Test-Path -LiteralPath $gradle)) {
+        throw "Cannot find Gradle wrapper in $ProjectDir."
+    }
+
+    $oldAndroidHome = [Environment]::GetEnvironmentVariable("ANDROID_HOME")
+    $oldAndroidSdkRoot = [Environment]::GetEnvironmentVariable("ANDROID_SDK_ROOT")
+
+    try {
+        [Environment]::SetEnvironmentVariable(
+            "ANDROID_HOME",
+            $AndroidSdkRoot
+        )
+
+        [Environment]::SetEnvironmentVariable(
+            "ANDROID_SDK_ROOT",
+            $AndroidSdkRoot
+        )
+
+        Invoke-Checked `
+            -FilePath $gradle `
+            -ArgumentList @(":app:assemble$Configuration") `
+            -WorkingDirectory $ProjectDir
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable(
+            "ANDROID_HOME",
+            $oldAndroidHome
+        )
+
+        [Environment]::SetEnvironmentVariable(
+            "ANDROID_SDK_ROOT",
+            $oldAndroidSdkRoot
+        )
+    }
+}
+
+
+function Copy-CofAndroidApk {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectDir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Configuration,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputApk
+    )
+
+    $variantDir = $Configuration.ToLowerInvariant()
+
+    $apkDir = Join-Path `
+        $ProjectDir `
+        "app\build\outputs\apk\$variantDir"
+
+    $apk = Get-ChildItem `
+        -LiteralPath $apkDir `
+        -File `
+        -Filter "*.apk" `
+        -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+
+    if (-not $apk) {
+        throw "Gradle did not produce an APK in $apkDir."
+    }
+
+    New-Item `
+        -ItemType Directory `
+        -Path (Split-Path -Parent $OutputApk) `
+        -Force |
+        Out-Null
+
+    Copy-Item `
+        -LiteralPath $apk.FullName `
+        -Destination $OutputApk `
+        -Force
+}
