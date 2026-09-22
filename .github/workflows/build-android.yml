@@ -47,7 +47,7 @@ jobs:
       - name: Build Cry of Fear Android APK
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Continue"
+          $ErrorActionPreference = "Stop"
 
           Write-Host "===== STARTING BUILD ====="
 
@@ -61,11 +61,59 @@ jobs:
             -Jobs 2
 
           Write-Host "===== BUILD SCRIPT FINISHED ====="
-          Write-Host "===== SEARCHING FOR APK ====="
 
-          Get-ChildItem -Path . -Filter *.apk -Recurse -ErrorAction SilentlyContinue |
-            ForEach-Object {
-              Write-Host "APK FOUND: $($_.FullName)"
+      - name: Find generated APK
+        shell: bash
+        run: |
+          echo "===== SEARCHING FOR APK FILES ====="
+
+          APK_FILES=$(find . -type f -name "*.apk" -print)
+
+          if [ -z "$APK_FILES" ]; then
+            echo "ERROR: No APK file was generated."
+            echo ""
+            echo "===== BUILD DIRECTORY ====="
+
+            if [ -d "build" ]; then
+              find build -type f -print
+            else
+              echo "No build directory exists."
+            fi
+
+            echo ""
+            echo "===== ANDROID PROJECT DIRECTORY ====="
+
+            if [ -d "build/android" ]; then
+              find build/android -type f -print
+            fi
+
+            exit 1
+          fi
+
+          echo "APK file(s) found:"
+          echo "$APK_FILES"
+
+      - name: Prepare APK for upload
+        shell: bash
+        run: |
+          mkdir -p out/android
+
+          APK_PATH=$(find . -type f -name "*.apk" | head -n 1)
+
+          echo "Using APK:"
+          echo "$APK_PATH"
+
+          cp "$APK_PATH" "out/android/xash3d-cof.apk"
+
+          echo "Final APK:"
+          ls -lh "out/android/xash3d-cof.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cry-of-fear-android-arm64
+          path: out/android/xash3d-cof.apk
+          if-no-files-found: error              Write-Host "APK FOUND: $($_.FullName)"
             }
 
           Write-Host "===== SEARCHING BUILD DIRECTORIES ====="
